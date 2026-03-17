@@ -1,0 +1,10 @@
+/node_modules
+/package-lock.json
+/package.json
+/.env
+
+/public/uploads
+.vercel
+
+
+testMail.js
