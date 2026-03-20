@@ -1,60 +1,46 @@
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+import NodeCache from "node-cache";
 
+const mlCache = new NodeCache({ stdTTL: 3600 }); // 1 hour cache
 const ML_BASE_URL = process.env.ML_SERVICE_URL || "http://localhost:8000";
 
-// 1. Predict Case (JSON Body)
-// 1. Predict Case (Fixed with Case Type Number Mapping)
+// 🚀 CACHED API
 export const predictCase = asyncHandler(async (req, res) => {
-    const { case_type, lawyer_exp, judge_exp, judge_count,complexity,evidence } = req.body;
+    const { case_type, lawyer_exp, judge_exp, judge_count, complexity, evidence } = req.body;
 
-    // 🚀 Translator: Frontend ki string ko ML ke number mein convert karein
-    const caseTypeMapping = {
-        "Criminal": 0,
-        "Civil": 1,
-        "Family": 2,
-        "Corporate": 3,
-        "Tax": 4,
-        "Constitutional": 5,
-        "Labor": 6,
-        "Property": 7
-    };
+    const cacheKey = `predict_${case_type}_${lawyer_exp}_${judge_exp}_${judge_count}_${complexity}_${evidence}`;
+    const cachedData = mlCache.get(cacheKey);
+    if (cachedData) return res.status(200).json(new ApiResponse(200, cachedData, "Prediction successful (Cached)"));
 
-    // Agar mapping mein value mili toh wo number use karo, warna default 0 bhej do
+    const caseTypeMapping = { "Criminal": 0, "Civil": 1, "Family": 2, "Corporate": 3, "Tax": 4, "Constitutional": 5, "Labor": 6, "Property": 7 };
     const mapped_case_type = caseTypeMapping[case_type] !== undefined ? caseTypeMapping[case_type] : 0;
 
     const response = await fetch(`${ML_BASE_URL}/api/v1/predict`, {
         method: "POST",
-        headers: { 
-            "Content-Type": "application/json",
-            "Authorization": req.headers.authorization || "" 
-        },
+        headers: { "Content-Type": "application/json", "Authorization": req.headers.authorization || "" },
         body: JSON.stringify({ 
-            case_type: mapped_case_type, // Yahan ML ko ab number jayega!
-            lawyer_exp: Number(lawyer_exp), // Ise bhi strictly number bana diya
-            judge_exp: Number(judge_exp),
-            judge_count: Number(judge_count),
-            complexity:Number(complexity),
-            evidence:Number(evidence)
+            case_type: mapped_case_type, lawyer_exp: Number(lawyer_exp), judge_exp: Number(judge_exp), 
+            judge_count: Number(judge_count), complexity: Number(complexity), evidence: Number(evidence)
         })
     });
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        console.error("❌ PYTHON ML ERROR:", errorText);
-        throw new ApiError(response.status, `Prediction failed on ML Server: ${errorText}`);
-    }
-
+    if (!response.ok) throw new ApiError(response.status, `Prediction failed on ML Server`);
     const data = await response.json();
+    
+    mlCache.set(cacheKey, data);
     return res.status(200).json(new ApiResponse(200, data, "Prediction successful"));
 });
 
-
-// 2. Ask Vakil Sahab (POST request but Python expects Query Params)
+// 🚀 CACHED API
 export const askVakilSahab = asyncHandler(async (req, res) => {
     const { user_query, docs_path = "data", db_path = "db", k = 5 } = req.body;
     if (!user_query) throw new ApiError(400, "user_query is required");
+
+    const cacheKey = `vakil_${user_query}_${k}`;
+    const cachedData = mlCache.get(cacheKey);
+    if (cachedData) return res.status(200).json(new ApiResponse(200, cachedData, "Chat response fetched (Cached)"));
 
     const mlUrl = new URL(`${ML_BASE_URL}/api/v1/chat/ask_vakil_sahab`);
     mlUrl.searchParams.append("user_query", user_query);
@@ -66,11 +52,12 @@ export const askVakilSahab = asyncHandler(async (req, res) => {
     if (!response.ok) throw new ApiError(500, "Vakil Sahab chat failed");
     const data = await response.json();
 
+    mlCache.set(cacheKey, data);
     return res.status(200).json(new ApiResponse(200, data, "Chat response fetched"));
 });
 
-// 3. Chat MCP Agent (POST request with Query Params)
 export const chatMcpAgent = asyncHandler(async (req, res) => {
+    // Agent Chat - No Cache (Requires dynamic thinking)
     const { query } = req.body;
     if (!query) throw new ApiError(400, "query is required");
 
@@ -84,10 +71,14 @@ export const chatMcpAgent = asyncHandler(async (req, res) => {
     return res.status(200).json(new ApiResponse(200, data, "Agent response fetched"));
 });
 
-// 4. Legal Web Search (GET request with Query Params)
+// 🚀 CACHED API
 export const legalWebSearch = asyncHandler(async (req, res) => {
-    const { query, max_results = 5 } = req.query; // GET requests use req.query
+    const { query, max_results = 5 } = req.query; 
     if (!query) throw new ApiError(400, "query is required");
+
+    const cacheKey = `search_${query}_${max_results}`;
+    const cachedData = mlCache.get(cacheKey);
+    if (cachedData) return res.status(200).json(new ApiResponse(200, cachedData, "Search results fetched (Cached)"));
 
     const mlUrl = new URL(`${ML_BASE_URL}/api/v1/search/legal_web_search`);
     mlUrl.searchParams.append("query", query);
@@ -97,28 +88,25 @@ export const legalWebSearch = asyncHandler(async (req, res) => {
     if (!response.ok) throw new ApiError(500, "Legal search failed");
     const data = await response.json();
 
+    mlCache.set(cacheKey, data);
     return res.status(200).json(new ApiResponse(200, data, "Search results fetched"));
 });
 
-// 5. Ingest Legal Data (GET request with Query Params)
 export const ingestLegalData = asyncHandler(async (req, res) => {
+    // Action Trigger - No cache
     const { source = "kaggle" } = req.query;
-
     const mlUrl = new URL(`${ML_BASE_URL}/api/v1/ingest/ingest_legal_data`);
     mlUrl.searchParams.append("source", source);
 
     const response = await fetch(mlUrl);
     if (!response.ok) throw new ApiError(500, "Data ingestion failed");
     const data = await response.json();
-
     return res.status(200).json(new ApiResponse(200, data, "Data ingested successfully"));
 });
 
-// 6. Health Check (GET request)
 export const checkHealth = asyncHandler(async (req, res) => {
     const response = await fetch(`${ML_BASE_URL}/health`);
     if (!response.ok) throw new ApiError(500, "ML Service is down");
     const data = await response.json();
-
     return res.status(200).json(new ApiResponse(200, data, "ML Service is healthy"));
 });

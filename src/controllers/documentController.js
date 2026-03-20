@@ -4,98 +4,83 @@ import fs from "fs";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { ApiError } from "../utils/ApiError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { Document } from "../models/documentModel.js"; // Aapka naya Document model
+import { Document } from "../models/documentModel.js";
+import NodeCache from "node-cache";
 
-// 1. Helper function to call ML Server (Harsh's Domain)
-const callLegalMlServer = async (endpoint, file) => {
-    // Harsh ke server ka base URL (e.g., http://localhost:8500 ya ngrok IP)
-    const ML_SERVER_URL = process.env.ML_SERVER_URL || `http://localhost:8000${endpoint}`;
+const docCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+const RAG_BASE_URL = process.env.MULTI_RAG_SERVICE_URL || "http://localhost:8001"; // Aapke swagger UI wala URL
 
-    const formData = new FormData();
-    formData.append('file', fs.createReadStream(file.path), {
-        filename: file.originalname,
-        contentType: file.mimetype
-    });
-
-    try {
-        const response = await axios.post(ML_SERVER_URL, formData, {
-            headers: {
-                ...formData.getHeaders()
-            },
-            timeout: 120000, // 2 Minutes timeout (AI models take time)
-        });
-        return response.data;
-    } catch (error) {
-        const errorMsg = error.code === 'ECONNREFUSED' 
-            ? "ML Server is offline or unreachable. Is Harsh's server running?" 
-            : (error.response?.data?.detail || error.message);
-
-        throw new ApiError(error.response?.status || 500, `ML Pipeline Error: ${errorMsg}`);
-    }
-}
-
-// 2. Main Processing Controller
-const processLegalDocumentController = asyncHandler(async (req, res) => {
-    if (!req.file) {
-        throw new ApiError(400, "Legal document (PDF or Image) is required");
-    }
+export const processLegalDocumentController = asyncHandler(async (req, res) => {
+    if (!req.file) throw new ApiError(400, "Legal document (PDF/Image) is required");
 
     let documentRecord;
 
     try {
-        // Step A: Database mein initial entry banao
-        documentRecord = await Document.create({
-            userId: req.user._id,
-            originalFileName: req.file.originalname,
-            status: 'processing'
+        // 1. Database mein 'processing' status ke sath entry
+        documentRecord = await Document.create({ 
+            userId: req.user._id, 
+            originalFileName: req.file.originalname, 
+            status: 'processing' 
         });
 
-        console.log(`[INFO] Sending ${req.file.originalname} to ML Server for OCR & AI Summary...`);
+        // 2. File ko ML/RAG server bhejne ke liye taiyaar karo
+        const formData = new FormData();
+        formData.append('file', fs.createReadStream(req.file.path), {
+            filename: req.file.originalname,
+            contentType: req.file.mimetype
+        });
 
-        // Step B: Harsh ke ML server ko hit karo (Endpoint use '/simplify' bananeko bolna)
-        const mlResult = await callLegalMlServer("/simplify", req.file);
+        console.log(`[INFO] Sending ${req.file.originalname} to RAG Server...`);
 
-        // Step C: ML Server se aayi details Database mein update karo
+        // 3. RAG Server ko Hit karo (/uploader/post_content)
+        const response = await axios.post(`${RAG_BASE_URL}/uploader/post_content`, formData, {
+            headers: { 
+                ...formData.getHeaders(),
+                "user_id": String(req.user._id) // RAG ko user_id chahiye thi
+            },
+            timeout: 120000 
+        });
+
+        // 4. Sab theek raha toh DB update karo
         documentRecord.status = 'completed';
-        documentRecord.extractedText = mlResult.extracted_text || "Text extraction pending";
-        documentRecord.simplifiedSummary = mlResult.simplified_summary || "Summary generation pending";
-        documentRecord.entities = mlResult.entities || {}; 
-        
+        documentRecord.extractedText = response.data?.text || "Uploaded to RAG knowledge base";
         await documentRecord.save();
 
-        // Step D: Clean up local file 
+        // 5. VS Code se Temp file delete kar do
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        
+        // 6. Cache clear karo taaki dashboard history update ho jaye
+        docCache.del(`history_${req.user._id}`);
 
-        // Step E: Send success response to Siddharth (Frontend)
         return res.status(200).json(
-            new ApiResponse(200, documentRecord, "Document successfully processed and simplified!")
+            new ApiResponse(200, documentRecord, "Document successfully uploaded and processed by RAG!")
         );
 
     } catch (error) {
-        // Agar fail hua, toh database ka status 'failed' kar do
+        // Agar kuch fail hua toh status 'failed' mark karo
         if (documentRecord) {
             documentRecord.status = 'failed';
             await documentRecord.save();
         }
         
-        // Clean up memory
+        // Temp file clean karo
         if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         
-        console.error("Document Processing Error:", error);
-        throw error;
+        const errMessage = error.response?.data || error.message;
+        console.error("Document Processing Error:", errMessage);
+        throw new ApiError(500, `Failed to process document: ${JSON.stringify(errMessage)}`);
     }
 });
 
-// 3. User ki Dashboard History ke liye Controller (Frontend par purane cases dikhane ke liye)
-const getUserDocumentsController = asyncHandler(async (req, res) => {
-    const documents = await Document.find({ userId: req.user._id }).sort({ createdAt: -1 });
-    
-    return res.status(200).json(
-        new ApiResponse(200, documents, "User document history fetched successfully")
-    );
-});
+// History endpoint waisa hi rahega...
+export const getUserDocumentsController = asyncHandler(async (req, res) => {
+    const cacheKey = `history_${req.user._id}`;
+    const cachedData = docCache.get(cacheKey);
 
-export {
-    processLegalDocumentController,
-    getUserDocumentsController
-};
+    if (cachedData) return res.status(200).json(new ApiResponse(200, cachedData, "User document history fetched (Cached)"));
+
+    const documents = await Document.find({ userId: req.user._id }).lean().sort({ createdAt: -1 });
+    
+    docCache.set(cacheKey, documents); 
+    return res.status(200).json(new ApiResponse(200, documents, "User document history fetched successfully"));
+});
