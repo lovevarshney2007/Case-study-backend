@@ -7,7 +7,7 @@ const ML_BASE_URL = process.env.ML_SERVICE_URL || "http://localhost:8000";
 // 1. Predict Case (JSON Body)
 // 1. Predict Case (Fixed with Case Type Number Mapping)
 export const predictCase = asyncHandler(async (req, res) => {
-    const { case_type, lawyer_exp, judge_exp, judge_count } = req.body;
+    const { case_type, lawyer_exp, judge_exp, judge_count,complexity,evidence } = req.body;
 
     // 🚀 Translator: Frontend ki string ko ML ke number mein convert karein
     const caseTypeMapping = {
@@ -34,7 +34,9 @@ export const predictCase = asyncHandler(async (req, res) => {
             case_type: mapped_case_type, // Yahan ML ko ab number jayega!
             lawyer_exp: Number(lawyer_exp), // Ise bhi strictly number bana diya
             judge_exp: Number(judge_exp),
-            judge_count: Number(judge_count)
+            judge_count: Number(judge_count),
+            complexity:Number(complexity),
+            evidence:Number(evidence)
         })
     });
 
